@@ -138,6 +138,7 @@ var stdin: std.fs.File = undefined;
 var stdout_writer: std.fs.File.Writer = undefined;
 var window_size: f16x2 = undefined;
 var user_cursor_pos: u16x2 = undefined;
+var command_buffer: ChainedString = undefined;
 
 pub fn main() !void {
     write(ENTER_ALTERNATE_SCREEN_BUFFER++HIDE_CURSOR);
@@ -200,6 +201,7 @@ pub fn main() !void {
     for (&plan_points) |*plan_point| {
         plan_point.tail = &plan_point.head;
     }
+    command_buffer.tail = &command_buffer.head;
 
 
     user_cursor_pos = Layout.plan.startPos();
@@ -240,6 +242,20 @@ pub fn main() !void {
                     user_cursor_pos -= u16x2{1,0};
                     moveCursorTo(user_cursor_pos);
                 },
+                'k' => {
+                    if (current_plan_point > 1) {
+                        current_plan_point -= 1; 
+                        user_cursor_pos[1] -= 1;
+                        moveCursorTo(user_cursor_pos);
+                    }
+                },
+                'j' => {
+                    if (current_plan_point < plans_number) {
+                        current_plan_point += 1; 
+                        user_cursor_pos[1] += 1;
+                        moveCursorTo(user_cursor_pos);
+                    }
+                },
                 'l' => {
                     user_cursor_pos += u16x2{1,0};
                     moveCursorTo(user_cursor_pos);
@@ -248,6 +264,7 @@ pub fn main() !void {
                     mode = .command;
                     moveCursorTo(Layout.bottom_line.startPos());
                     write(":");
+                    user_cursor_pos = Layout.bottom_line.startPos()+u16x2{2,0};
                 },
                 else => {},
             }
@@ -284,12 +301,59 @@ pub fn main() !void {
                 }
             }
         } else if (mode == .command) {
+            var link = command_buffer.tail;
             if (buffer[0] == '\x1b' or buffer[0] == 3) {
                 entering_normal();
                 mode = .normal; 
                 moveCursorTo(Layout.bottom_line.startPos());
-                write(" ");
+                const unrolling_factor = 16;
+                for (0..ws.ws_col/unrolling_factor) |_| {
+                    write(" "**unrolling_factor);
+                }
+                for (0..@mod(ws.ws_col, unrolling_factor)) |_| {
+                    write(" ");
+                }
                 continue;
+            }
+            else if (buffer[0] >= 32 and buffer[0] < 127) {
+                if (link.end < ChainedString.link_size) {
+                    moveCursorTo(user_cursor_pos);
+                    user_cursor_pos[0] += 1;
+                    write(buffer[0..1]);
+                    link.string[link.end] = buffer[0];
+                    link.end += 1;
+                }
+            }
+            else if (buffer[0] == 127) {
+                if (link.end > 0) {
+                    user_cursor_pos[0] -= 1;
+                    moveCursorTo(user_cursor_pos);
+                    write(" ");
+                    moveCursorTo(user_cursor_pos);
+                    link.end -= 1;
+                }
+            }
+            else if (buffer[0] == '\n') {
+                const user_cursor_pos_name = "user_cursor_pos";
+                if (std.mem.eql(u8, link.string[0..link.end], user_cursor_pos_name)) {
+                    moveCursorTo(Layout.bottom_line.startPos()+u16x2{2,0});
+                    const to_clean = link.end;
+                    const unrolling_factor = 16;
+                    for (0..to_clean/unrolling_factor) |_| {
+                        write(" "**unrolling_factor);
+                    }
+                    for (0..@mod(to_clean, unrolling_factor)) |_| {
+                        write(" ");
+                    }
+                    moveCursorTo(Layout.bottom_line.startPos()+u16x2{2,0});
+                    print("{}", .{user_cursor_pos});
+                }
+                if (std.mem.eql(u8, link.string[0..link.end], "q")) {
+                    moveCursorTo(Layout.bottom_line.startPos()+u16x2{2,0});
+                    write(" ");
+                    moveCursorTo(Layout.bottom_line.startPos()+u16x2{2,0});
+                    quit = true;
+                }
             }
         }
     }

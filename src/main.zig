@@ -27,9 +27,6 @@ const Modes = enum {
     normal,
     command,
 };
-const app_errors = error {
-    EXIT_FAILURE,
-};
 
 // fuck errors
 fn write(bytes: []const u8) void {
@@ -41,18 +38,20 @@ fn print(comptime format: []const u8, args: anytype) void {
     
 }
 
-fn moveCursor(pos: u16x2) void {
+fn moveCursorTo(pos: u16x2) void {
     print(CSI ++ "{};{}H", .{pos[1],pos[0]});
 }
 
 fn entering_insert() void {
-    moveCursor(Layout.bottom_line.startPos());
+    moveCursorTo(Layout.bottom_line.startPos());
     write("-- INSERT --");
+    moveCursorTo(user_cursor_pos);
 }
 
 fn entering_normal() void {
-    moveCursor(Layout.bottom_line.startPos());
+    moveCursorTo(Layout.bottom_line.startPos());
     write("            ");
+    moveCursorTo(user_cursor_pos);
 }
 
 const ChainedString = struct {
@@ -138,10 +137,11 @@ var stdout: std.fs.File = undefined;
 var stdin: std.fs.File = undefined;
 var stdout_writer: std.fs.File.Writer = undefined;
 var window_size: f16x2 = undefined;
+var user_cursor_pos: u16x2 = undefined;
 
 pub fn main() !void {
-    write(ENTER_ALTERNATE_SCREEN_BUFFER);
-    defer write(EXIT_ALTERNATE_SCREEN_BUFFER);
+    write(ENTER_ALTERNATE_SCREEN_BUFFER++HIDE_CURSOR);
+    defer write(EXIT_ALTERNATE_SCREEN_BUFFER++SHOW_CURSOR);
     var c_err: c_int = undefined;
     stdout = std.io.getStdOut();
     stdin = std.io.getStdIn();
@@ -162,7 +162,7 @@ pub fn main() !void {
     c_err = termios.tcgetattr(unistd.STDIN_FILENO, &original_termios_settings);
     if (c_err == -1) {
         std.log.err("tcgetattr failed", .{});
-        return error.EXIT_FAILURE;
+        @panic("");
     }
     var raw_termios_settings = original_termios_settings;
     raw_termios_settings.c_lflag &= @bitCast(@as(i64, ~(termios.ICANON | termios.ECHO | termios.ISIG)));
@@ -171,7 +171,7 @@ pub fn main() !void {
     c_err = termios.tcsetattr(unistd.STDIN_FILENO, termios.TCSAFLUSH, &raw_termios_settings);
     if (c_err == -1) {
         std.log.err("tcsetattr raw mode failed", .{});
-        return error.EXIT_FAILURE;
+        @panic("");
     }
     defer {
         c_err = termios.tcsetattr(unistd.STDIN_FILENO, termios.TCSAFLUSH, &original_termios_settings);
@@ -184,28 +184,28 @@ pub fn main() !void {
     c_err = ioctl.ioctl(unistd.STDOUT_FILENO, termios.TIOCGWINSZ, &ws);
     if (c_err == -1) {
         std.log.err("ioctl failed", .{});
+        @panic("");
     }
     window_size[0] = @floatFromInt(ws.ws_col);
     window_size[1] = @floatFromInt(ws.ws_row);
 
     const start_pos = Layout.logo.startPos();
-    moveCursor(start_pos);
+    moveCursorTo(start_pos);
     write(LOGO[0]);
-    moveCursor(start_pos+u16x2{0,1});
+    moveCursorTo(start_pos+u16x2{0,1});
     write(LOGO[1]);
-    moveCursor(start_pos+u16x2{0,2});
+    moveCursorTo(start_pos+u16x2{0,2});
     write(LOGO[2]);
 
-    moveCursor(Layout.plan.startPos());
-    var user_cursor_pos = Layout.plan.startPos()+u16x2{3,0};
     for (&plan_points) |*plan_point| {
         plan_point.tail = &plan_point.head;
     }
 
 
+    user_cursor_pos = Layout.plan.startPos();
     var plan_point: *ChainedString = undefined;
     while (!quit) {
-        var buffer: [1]u8 = undefined;
+        var buffer: [2]u8 = undefined;
         _ = stdin.read(&buffer) catch {
             continue;
         };
@@ -216,43 +216,49 @@ pub fn main() !void {
                     entering_insert();
                     if (plans_number == 0) {
                         plans_number = 1;
-                        moveCursor(Layout.plan.startPos());
+                        moveCursorTo(Layout.plan.startPos()-u16x2{3,0});
                         write("1. ");
                         plan_point = &plan_points[current_plan_point];
+                        write(SHOW_CURSOR);
                     }
                     mode = .insert;
                 },
                 'o' => {
                     entering_insert();
+                    mode = .insert;
+                    if (plans_number != 0) {
+                        user_cursor_pos[1] += 1;
+                    }
+                    user_cursor_pos[0] = Layout.plan.startPos()[0];
                     plans_number += 1;
                     current_plan_point += 1;
-                    moveCursor(Layout.plan.startPos()+u16x2{0,current_plan_point*2});
+                    moveCursorTo(Layout.plan.startPos()+u16x2{0,current_plan_point}-u16x2{3,0});
                     plan_point = &plan_points[current_plan_point];
-                    print("{}.", .{plans_number});
-                    
+                    print("{}. ", .{plans_number});
                 },
                 'h' => {
                     user_cursor_pos -= u16x2{1,0};
-                    moveCursor(user_cursor_pos);
+                    moveCursorTo(user_cursor_pos);
                 },
                 'l' => {
                     user_cursor_pos += u16x2{1,0};
-                    moveCursor(user_cursor_pos);
+                    moveCursorTo(user_cursor_pos);
                 },
                 ':' => {
                     mode = .command;
-                    moveCursor(Layout.bottom_line.startPos());
+                    moveCursorTo(Layout.bottom_line.startPos());
                     write(":");
                 },
                 else => {},
             }
         } else if (mode == .insert) {
-            if (buffer[0] == '\x1b') {
+            if (buffer[0] == '\x1b' or buffer[0] == 3) {
                 entering_normal();
                 if (plan_point.tail.end == 0) {
-                    moveCursor(Layout.plan.startPos());
+                    moveCursorTo(Layout.plan.startPos()-u16x2{3,0});
                     write("  ");
                     plans_number -= 1;
+                    write(HIDE_CURSOR);
                 }
                 mode = .normal; 
                 continue;
@@ -260,7 +266,7 @@ pub fn main() !void {
             else if (buffer[0] >= 32 and buffer[0] < 127) {
                 var link = plan_point.tail;
                 if (link.end < ChainedString.link_size) {
-                    moveCursor(user_cursor_pos);
+                    moveCursorTo(user_cursor_pos);
                     user_cursor_pos[0] += 1;
                     write(buffer[0..1]);
                     link.string[link.end] = buffer[0];
@@ -271,17 +277,17 @@ pub fn main() !void {
                 var link = plan_point.tail;
                 if (link.end > 0) {
                     user_cursor_pos[0] -= 1;
-                    moveCursor(user_cursor_pos);
+                    moveCursorTo(user_cursor_pos);
                     write(" ");
-                    moveCursor(user_cursor_pos);
+                    moveCursorTo(user_cursor_pos);
                     link.end -= 1;
                 }
             }
         } else if (mode == .command) {
-            if (buffer[0] == '\x1b') {
+            if (buffer[0] == '\x1b' or buffer[0] == 3) {
                 entering_normal();
                 mode = .normal; 
-                moveCursor(Layout.bottom_line.startPos());
+                moveCursorTo(Layout.bottom_line.startPos());
                 write(" ");
                 continue;
             }
